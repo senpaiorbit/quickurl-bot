@@ -1,99 +1,100 @@
 export default {
-  async fetch(request, env, ctx) {
-    try {
-      // Telegram sometimes sends GET for webhook check
-      if (request.method !== "POST") {
-        return new Response("OK", { status: 200 });
-      }
+  async fetch(request) {
+    const BOT_TOKEN = "8214031086:AAEDlY1VVTTv-FklSHl0sgFmi_k-T1IQbbs";
+    const PUBLIC_CHANNEL = "@quickURL_files";
 
-      const update = await request.json();
-
-      // SAFETY: always respond fast
-      ctx.waitUntil(handleUpdate(update, env));
-
-      return new Response("OK", { status: 200 });
-
-    } catch (err) {
-      return new Response("ERROR", { status: 200 });
+    if (request.method !== "POST") {
+      return new Response("OK");
     }
-  }
-};
 
-async function handleUpdate(update, env) {
-  if (!update.message) return;
+    const update = await request.json();
 
-  const msg = update.message;
-  const chatId = msg.chat.id;
-  const text = msg.text || "";
+    if (!update.message) {
+      return new Response("No message");
+    }
 
-  // /start handler
-  if (text.startsWith("/start")) {
-    await sendMessage(
-      env,
-      chatId,
-      "👋 Welcome to QuickURL Bot\n\n" +
-      "📤 Send or forward any file\n" +
-      "🔗 I will generate a public Telegram link\n\n" +
-      "📮 Channel: @quickURL_files"
-    );
-    return;
-  }
+    const message = update.message;
+    const chatId = message.chat.id;
+    const msgId = message.message_id;
+    const text = message.text || "";
 
-  const hasFile =
-    msg.document ||
-    msg.video ||
-    msg.audio ||
-    msg.photo;
+    // --- /start command ---
+    if (text.startsWith("/start")) {
+      await sendMessage(
+        BOT_TOKEN,
+        chatId,
+        "👋 Welcome to QuickURL Bot\n\n" +
+        "📤 Send or forward any file\n" +
+        "🔗 I'll generate a public Telegram link instantly\n\n" +
+        "⚡ Powered by @quickURL_files"
+      );
+      return new Response("Start handled");
+    }
 
-  if (!hasFile) {
-    await sendMessage(
-      env,
-      chatId,
-      "❗ Please send or forward a file."
-    );
-    return;
-  }
+    // --- Only handle files ---
+    const hasFile =
+      message.document ||
+      message.video ||
+      message.audio ||
+      message.photo;
 
-  const tgApi = `https://api.telegram.org/bot${env.BOT_TOKEN}`;
+    if (!hasFile) {
+      await sendMessage(
+        BOT_TOKEN,
+        chatId,
+        "❗ Please send or forward a file.\n\n" +
+        "Supported: documents, videos, audio, photos."
+      );
+      return new Response("No file");
+    }
 
-  const copy = await fetch(`${tgApi}/copyMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: env.PUBLIC_CHANNEL,
-      from_chat_id: chatId,
-      message_id: msg.message_id
-    })
-  });
+    const tgApi = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-  const data = await copy.json();
-  if (!data.ok) {
-    await sendMessage(env, chatId, "❌ Failed to upload");
-    return;
-  }
-
-  const channelMsgId = data.result.message_id;
-  const channel = env.PUBLIC_CHANNEL.replace("@", "");
-  const url = `https://t.me/${channel}/${channelMsgId}`;
-
-  await sendMessage(
-    env,
-    chatId,
-    `✅ Uploaded\n\n🔗 File Link:\n${url}\n\n🔗 Easy Copy:\n${url}`
-  );
-}
-
-async function sendMessage(env, chatId, text) {
-  await fetch(
-    `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`,
-    {
+    // --- Clone message to public channel ---
+    const copyRes = await fetch(`${tgApi}/copyMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: true
+        chat_id: PUBLIC_CHANNEL,
+        from_chat_id: chatId,
+        message_id: msgId
       })
+    });
+
+    const copyData = await copyRes.json();
+
+    if (!copyData.ok) {
+      await sendMessage(BOT_TOKEN, chatId, "❌ Upload failed. Try again.");
+      return new Response("Copy failed");
     }
-  );
+
+    const channelMsgId = copyData.result.message_id;
+    const channelUsername = PUBLIC_CHANNEL.replace("@", "");
+    const publicUrl = `https://t.me/${channelUsername}/${channelMsgId}`;
+
+    // --- Success reply ---
+    await sendMessage(
+      BOT_TOKEN,
+      chatId,
+      "✅ Uploaded to QuickURL\n\n" +
+      `🔗 File Link:\n${publicUrl}\n\n` +
+      `🔗 Easy Copy:\n${publicUrl}\n\n` +
+      "📮 Join @quickURL_files"
+    );
+
+    return new Response("Done");
+  }
+};
+
+async function sendMessage(botToken, chatId, text) {
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true
+    })
+  });
 }
