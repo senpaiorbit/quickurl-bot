@@ -1,108 +1,64 @@
 export default async function handler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Credentials', true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept');
-
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
-  }
-
   try {
-    // Get the URL from query parameter
-    const { url } = req.query;
+    const fileUrl = req.query.url;
 
-    if (!url) {
-      return res.status(400).json({ 
-        error: 'Missing url parameter',
-        usage: '/api/mirror.js?url={full_url}'
+    if (!fileUrl) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing ?url parameter"
       });
     }
 
-    // Validate URL
-    let targetUrl;
-    try {
-      targetUrl = new URL(url);
-    } catch (e) {
-      return res.status(400).json({ error: 'Invalid URL provided' });
+    // ⚠️ Hardcoded credentials (as requested)
+    const GOFILE_ACCOUNT_ID = "9fff4533-7a87-405d-a20a-f75c938ff904";
+    const GOFILE_TOKEN = "EDlLlbUnWv00p78YoEetu2ziisd4wkRW";
+
+    // 1️⃣ Get best server
+    const serverRes = await fetch("https://api.gofile.io/getServer");
+    const serverData = await serverRes.json();
+
+    if (serverData.status !== "ok") {
+      throw new Error("Failed to get GoFile server");
     }
 
-    // Fetch the file from the source URL
-    const fileResponse = await fetch(url);
-    
-    if (!fileResponse.ok) {
-      return res.status(fileResponse.status).json({ 
-        error: `Failed to fetch file: ${fileResponse.statusText}` 
-      });
-    }
+    const server = serverData.data.server;
 
-    // Get file as buffer
-    const fileBuffer = Buffer.from(await fileResponse.arrayBuffer());
-    
-    // Extract filename from URL or use default
-    const urlPath = targetUrl.pathname;
-    const filename = urlPath.split('/').pop() || 'downloaded_file';
-    
-    // Get content type
-    const contentType = fileResponse.headers.get('content-type') || 'application/octet-stream';
-
-    // Import form-data dynamically
-    const FormData = (await import('form-data')).default;
-    const formData = new FormData();
-    
-    // Append file with proper options
-    formData.append('file', fileBuffer, {
-      filename: filename,
-      contentType: contentType
-    });
-
-    // Upload to devuploads.com with proper headers
-    const uploadResponse = await fetch('https://devuploads.com/api', {
-      method: 'POST',
+    // 2️⃣ Remote upload (URL → GoFile)
+    const uploadRes = await fetch(`https://${server}.gofile.io/uploadFile`, {
+      method: "POST",
       headers: {
-        'key': '1240962gatdo40wtrx6qce',
-        ...formData.getHeaders()
+        "Authorization": `Bearer ${GOFILE_TOKEN}`,
+        "Content-Type": "application/json"
       },
-      body: formData
+      body: JSON.stringify({
+        uploadType: "url",
+        url: fileUrl,
+        accountId: GOFILE_ACCOUNT_ID
+      })
     });
 
-    // Get response text first to handle both JSON and HTML
-    const responseText = await uploadResponse.text();
-    
-    if (!uploadResponse.ok) {
-      return res.status(uploadResponse.status).json({ 
-        error: 'Upload failed',
-        status: uploadResponse.status,
-        details: responseText.substring(0, 500) // Limit error output
+    const uploadData = await uploadRes.json();
+
+    if (uploadData.status !== "ok") {
+      return res.status(500).json({
+        success: false,
+        error: uploadData
       });
     }
 
-    // Try to parse as JSON
-    let uploadResult;
-    try {
-      uploadResult = JSON.parse(responseText);
-    } catch (e) {
-      // If not JSON, return the text response
-      uploadResult = { response: responseText.substring(0, 500) };
-    }
-
-    // Return success response
+    // ✅ Success
     return res.status(200).json({
       success: true,
-      original_url: url,
-      filename: filename,
-      upload_result: uploadResult,
-      message: 'File successfully mirrored to devuploads.com'
+      name: uploadData.data.fileName,
+      size: uploadData.data.size,
+      downloadPage: uploadData.data.downloadPage,
+      directLink: uploadData.data.directLink
     });
 
-  } catch (error) {
-    console.error('Error:', error);
-    return res.status(500).json({ 
-      error: 'Internal server error',
-      message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message
     });
   }
 }
