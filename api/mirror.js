@@ -1,101 +1,89 @@
-export default {
-  async fetch(request) {
-    if (request.method !== "GET") {
-      return new Response("Method Not Allowed", { status: 405 });
+export default async function handler(req, res) {
+  // Enable CORS
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type, Accept');
+
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
+  try {
+    // Get the URL from query parameter
+    const { url } = req.query;
+
+    if (!url) {
+      return res.status(400).json({ 
+        error: 'Missing url parameter',
+        usage: '/api/mirror.js?url={full_url}'
+      });
     }
 
-    const { searchParams } = new URL(request.url);
-    const url = searchParams.get("url");
-
-    if (!url || !/^https?:\/\//i.test(url)) {
-      return json({
-        ok: false,
-        error: "Valid ?url= parameter required"
-      }, 400);
+    // Validate URL
+    let targetUrl;
+    try {
+      targetUrl = new URL(url);
+    } catch (e) {
+      return res.status(400).json({ error: 'Invalid URL provided' });
     }
 
-    const servers = {};
-
-    /* ================= PIXELDRAIN (REMOTE) ================= */
-    try {
-      const r = await fetch("https://pixeldrain.com/api/remote", {
-        method: "POST",
-        headers: {
-          "Authorization":
-            "Basic " + btoa(":" + "cc3b6605-22c9-4ee6-a826-54bc62621d81"),
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ url })
-      }).then(r => r.json());
-
-      if (r?.success && r?.id) {
-        servers.pixeldrain = `https://pixeldrain.com/u/${r.id}`;
-      }
-    } catch {}
-
-    /* ================= DEVUPLOADS (REMOTE) ================= */
-    try {
-      const s = await fetch(
-        "https://devuploads.com/api/upload/server?key=1240962gatdo40wtrx6qce"
-      ).then(r => r.json());
-
-      if (s?.result) {
-        const r = await fetch(`${s.result}/upload`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded"
-          },
-          body: new URLSearchParams({
-            key: "1240962gatdo40wtrx6qce",
-            url,
-            public: "1"
-          })
-        }).then(r => r.json());
-
-        if (r?.result?.link) {
-          servers.devuploads = r.result.link;
-        }
-      }
-    } catch {}
-
-    /* ================= GOFILE (REMOTE UPLOAD) ================= */
-    try {
-      const r = await fetch("https://api.gofile.io/remoteUpload", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          token: "EDlLlbUnWv00p78YoEetu2ziisd4wkRW",
-          folderId: "9fff4533-7a87-405d-a20a-f75c938ff904",
-          url
-        })
-      }).then(r => r.json());
-
-      if (r?.status === "ok") {
-        servers.gofile = r.data.downloadPage;
-      }
-    } catch {}
-
-    /* ================= FINAL ================= */
-    if (Object.keys(servers).length === 0) {
-      return json({
-        ok: false,
-        error: "All remote uploads failed",
-        reason: "Source host blocks remote fetch or provider rejected URL"
-      }, 502);
+    // Fetch the file from the source URL
+    const fileResponse = await fetch(url);
+    
+    if (!fileResponse.ok) {
+      return res.status(fileResponse.status).json({ 
+        error: `Failed to fetch file: ${fileResponse.statusText}` 
+      });
     }
 
-    return json({
-      ok: true,
-      servers
+    // Get file as buffer
+    const fileBuffer = await fileResponse.arrayBuffer();
+    const blob = new Blob([fileBuffer]);
+
+    // Prepare form data for devuploads.com
+    const formData = new FormData();
+    
+    // Extract filename from URL or use default
+    const urlPath = targetUrl.pathname;
+    const filename = urlPath.split('/').pop() || 'file';
+    
+    formData.append('file', blob, filename);
+
+    // Upload to devuploads.com
+    const uploadResponse = await fetch('https://devuploads.com/api', {
+      method: 'POST',
+      headers: {
+        'key': '1240962gatdo40wtrx6qce'
+      },
+      body: formData
+    });
+
+    if (!uploadResponse.ok) {
+      const errorText = await uploadResponse.text();
+      return res.status(uploadResponse.status).json({ 
+        error: 'Upload failed',
+        details: errorText
+      });
+    }
+
+    // Get the response from devuploads
+    const uploadResult = await uploadResponse.json();
+
+    // Return success response
+    return res.status(200).json({
+      success: true,
+      original_url: url,
+      upload_result: uploadResult,
+      message: 'File successfully mirrored to devuploads.com'
+    });
+
+  } catch (error) {
+    console.error('Error:', error);
+    return res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
     });
   }
-};
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { "Content-Type": "application/json" }
-  });
 }
