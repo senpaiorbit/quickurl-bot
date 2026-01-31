@@ -2,8 +2,7 @@ export default {
   async fetch(request) {
     const BOT_TOKEN = "8214031086:AAEDlY1VVTTv-FklSHl0sgFmi_k-T1IQbbs";
     const PUBLIC_CHANNEL = "@quickURL_files";
-    const VERCEL_API_URL = "https://quickurl-bot.vercel.app/api/mirror";
-    const DB_URL = "postgresql://postgres.hvopahixclbellzicipi:KbVwuzULdLAnAsNh@aws-1-ap-south-1.pooler.supabase.com:6543/postgres";
+    const VERCEL_MIRROR_API = "https://quickurl-bot.vercel.app/api/mirror";
 
     if (request.method !== "POST") {
       return new Response("OK");
@@ -28,7 +27,7 @@ export default {
         "👋 Welcome to QuickURL Bot\n\n" +
         "📤 Send or forward any file\n" +
         "🔗 I'll generate a public Telegram link instantly\n" +
-        "🪞 Plus mirror on multiple servers\n\n" +
+        "🪞 Plus mirror on multiple servers (Pixeldrain, DevUploads)\n\n" +
         "⚡ Powered by @quickURL_files"
       );
       return new Response("Start handled");
@@ -82,8 +81,7 @@ export default {
     }
 
     const fileName = fileInfo.file_name || `${fileType}_${Date.now()}`;
-    const fileSizeBytes = fileInfo.file_size || 0;
-    const fileSize = formatFileSize(fileSizeBytes);
+    const fileSize = formatFileSize(fileInfo.file_size || 0);
     const username = message.from.username ? `@${message.from.username}` : message.from.first_name || "Anonymous";
     const uploadTime = formatTime(message.date);
 
@@ -107,53 +105,34 @@ export default {
 
     const channelMsgId = copyData.result.message_id;
     const channelUsername = PUBLIC_CHANNEL.replace("@", "");
-    const publicUrl = `https://t.me/${channelUsername}/${channelMsgId}`;
 
-    // --- Get Telegram direct URL ---
-    const filePathRes = await fetch(`${tgApi}/getFile?file_id=${fileId}`);
-    const filePathData = await filePathRes.json();
-    let telegramDirectUrl = "";
-    
-    if (filePathData.ok) {
-      const filePath = filePathData.result.file_path;
-      telegramDirectUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
-    }
-
-    // --- Save metadata to Supabase using pg library emulation ---
-    let dbRecordId = 0;
+    // --- Get Telegram direct file URL ---
+    let directUrl = "";
     try {
-      const insertQuery = `
-        INSERT INTO files (file_id, file_name, file_type, file_size, username, telegram_url)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id;
-      `;
+      const filePathRes = await fetch(`${tgApi}/getFile?file_id=${fileId}`);
+      const filePathData = await filePathRes.json();
       
-      // Using fetch to simulate pg query (you'll need a serverless function or use Supabase REST API)
-      // For simplicity, using Supabase REST API
-      const supabaseRes = await fetch(`https://hvopahixclbellzicipi.supabase.co/rest/v1/files`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': 'YOUR_SUPABASE_ANON_KEY', // Replace with your actual key
-          'Authorization': 'Bearer YOUR_SUPABASE_ANON_KEY',
-          'Prefer': 'return=representation'
-        },
-        body: JSON.stringify({
-          file_id: fileId,
-          file_name: fileName,
-          file_type: fileType,
-          file_size: fileSizeBytes,
-          username: username,
-          telegram_url: telegramDirectUrl
-        })
-      });
-      
-      const dbData = await supabaseRes.json();
-      if (dbData && dbData.length > 0) {
-        dbRecordId = dbData[0].id;
+      if (filePathData.ok) {
+        const filePath = filePathData.result.file_path;
+        directUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
       }
     } catch (error) {
-      console.error("Database insert error:", error);
+      console.error("Error getting file URL:", error);
+    }
+
+    // --- Send to Vercel Mirror API ---
+    let mirrorUrls = {};
+    if (directUrl) {
+      try {
+        const mirrorRes = await fetch(`${VERCEL_MIRROR_API}?url=${encodeURIComponent(directUrl)}&filename=${encodeURIComponent(fileName)}`);
+        const mirrorData = await mirrorRes.json();
+        
+        if (mirrorData.ok) {
+          mirrorUrls = mirrorData.servers || {};
+        }
+      } catch (error) {
+        console.error("Mirror API error:", error);
+      }
     }
 
     // --- Send caption to channel ---
@@ -177,42 +156,34 @@ export default {
       })
     });
 
-    // --- Call Vercel API for mirroring ---
-    let mirrorUrls = {};
-    if (dbRecordId > 0) {
-      try {
-        const mirrorRes = await fetch(`${VERCEL_API_URL}?id=${dbRecordId}`);
-        const mirrorData = await mirrorRes.json();
-        
-        if (mirrorData.success) {
-          mirrorUrls = mirrorData;
-        }
-      } catch (error) {
-        console.error("Vercel mirror error:", error);
-      }
-    }
+    const publicUrl = `https://t.me/${channelUsername}/${channelMsgId}`;
 
     // --- Success reply to user ---
-    let successMessage =
+    let successMessage = 
       "✅ Uploaded to QuickURL\n\n" +
       `🔗 Telegram Link:\n${publicUrl}\n\n`;
-
-    if (mirrorUrls.server1) {
-      successMessage += `🪞 Pixeldrain Mirror:\n${mirrorUrls.server1}\n\n`;
+    
+    // Add mirror links
+    if (mirrorUrls["1"]) {
+      successMessage += `🪞 Pixeldrain Mirror:\n${mirrorUrls["1"]}\n\n`;
     }
-
-    if (mirrorUrls.server2) {
-      successMessage += `🪞 DevUploads Mirror:\n${mirrorUrls.server2}\n\n`;
+    
+    if (mirrorUrls["2"]) {
+      successMessage += `🪞 DevUploads Mirror:\n${mirrorUrls["2"]}\n\n`;
     }
-
-    successMessage +=
+    
+    successMessage += 
       `📋 Details:\n` +
       `${fileEmoji} Type: ${fileType}\n` +
       `📦 Size: ${fileSize}\n` +
       `⏰ Uploaded: ${uploadTime}\n\n` +
       `📮 Join @quickURL_files`;
 
-    await sendMessage(BOT_TOKEN, chatId, successMessage);
+    await sendMessage(
+      BOT_TOKEN,
+      chatId,
+      successMessage
+    );
 
     return new Response("Done");
   }
