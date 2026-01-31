@@ -3,6 +3,7 @@ export default {
     const BOT_TOKEN = "8214031086:AAEDlY1VVTTv-FklSHl0sgFmi_k-T1IQbbs";
     const PUBLIC_CHANNEL = "@quickURL_files";
     const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
+    const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
 
     if (request.method !== "POST") {
       return new Response("OK");
@@ -27,7 +28,7 @@ export default {
         "👋 Welcome to QuickURL Bot\n\n" +
         "📤 Send or forward any file\n" +
         "🔗 I'll generate a public Telegram link instantly\n" +
-        "🪞 Plus mirror on Pixeldrain for direct download\n\n" +
+        "🪞 Plus mirror on Pixeldrain & DevUploads\n\n" +
         "⚡ Powered by @quickURL_files"
       );
       return new Response("Start handled");
@@ -85,22 +86,30 @@ export default {
     const username = message.from.username ? `@${message.from.username}` : message.from.first_name || "Anonymous";
     const uploadTime = formatTime(message.date);
 
-    // --- Upload to Pixeldrain ---
-    let pixeldrainUrl = "";
+    // --- Get file from Telegram ---
+    let fileUrl = "";
+    let fileBlob = null;
+    
     try {
-      // Get file path from Telegram
       const filePathRes = await fetch(`${tgApi}/getFile?file_id=${fileId}`);
       const filePathData = await filePathRes.json();
       
       if (filePathData.ok) {
         const filePath = filePathData.result.file_path;
-        const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+        fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
         
         // Download file from Telegram
         const fileResponse = await fetch(fileUrl);
-        const fileBlob = await fileResponse.blob();
-        
-        // Upload to Pixeldrain
+        fileBlob = await fileResponse.blob();
+      }
+    } catch (error) {
+      console.error("Telegram file download error:", error);
+    }
+
+    // --- Upload to Pixeldrain ---
+    let pixeldrainUrl = "";
+    if (fileBlob) {
+      try {
         const formData = new FormData();
         formData.append('file', fileBlob, fileName);
         
@@ -117,10 +126,31 @@ export default {
         if (pixeldrainData.success && pixeldrainData.id) {
           pixeldrainUrl = `https://pixeldrain.com/u/${pixeldrainData.id}`;
         }
+      } catch (error) {
+        console.error("Pixeldrain upload error:", error);
       }
-    } catch (error) {
-      console.error("Pixeldrain upload error:", error);
-      pixeldrainUrl = "Upload failed";
+    }
+
+    // --- Upload to DevUploads ---
+    let devuploadsUrl = "";
+    if (fileBlob) {
+      try {
+        const formData = new FormData();
+        formData.append('file', fileBlob, fileName);
+        
+        const devuploadsRes = await fetch(`https://devuploads.com/api/upload?key=${DEVUPLOADS_API_KEY}`, {
+          method: 'POST',
+          body: formData
+        });
+        
+        const devuploadsData = await devuploadsRes.json();
+        
+        if (devuploadsData.status === 200 && devuploadsData.data && devuploadsData.data.url) {
+          devuploadsUrl = devuploadsData.data.url;
+        }
+      } catch (error) {
+        console.error("DevUploads upload error:", error);
+      }
     }
 
     // --- First, send the file to channel ---
@@ -170,17 +200,22 @@ export default {
     // --- Success reply to user ---
     let successMessage = 
       "✅ Uploaded to QuickURL\n\n" +
-      `🔗 File Link:\n${publicUrl}\n\n` +
+      `🔗 Telegram Link:\n${publicUrl}\n\n`;
+    
+    if (pixeldrainUrl) {
+      successMessage += `🪞 Pixeldrain Mirror:\n${pixeldrainUrl}\n\n`;
+    }
+    
+    if (devuploadsUrl) {
+      successMessage += `🪞 DevUploads Mirror:\n${devuploadsUrl}\n\n`;
+    }
+    
+    successMessage += 
       `📋 Details:\n` +
       `${fileEmoji} Type: ${fileType}\n` +
       `📦 Size: ${fileSize}\n` +
-      `⏰ Uploaded: ${uploadTime}\n\n`;
-    
-    if (pixeldrainUrl && pixeldrainUrl !== "Upload failed") {
-      successMessage += `🪞 Mirror Link:\n${pixeldrainUrl}\n\n`;
-    }
-    
-    successMessage += `📮 Join @quickURL_files`;
+      `⏰ Uploaded: ${uploadTime}\n\n` +
+      `📮 Join @quickURL_files`;
 
     await sendMessage(
       BOT_TOKEN,
