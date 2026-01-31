@@ -1,49 +1,44 @@
-import { Client } from 'pg';
+import FormData from 'form-data';
+import fetch from 'node-fetch';
 
-const DB_URL = "postgresql://postgres.hvopahixclbellzicipi:KbVwuzULdLAnAsNh@aws-1-ap-south-1.pooler.supabase.com:6543/postgres";
 const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
 const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
 
 export default async function handler(req, res) {
-  const { id } = req.query;
-
-  if (!id) {
-    return res.status(400).json({ success: false, error: "ID required" });
+  // Only allow GET requests
+  if (req.method !== 'GET') {
+    return res.status(405).json({ ok: false, error: 'Method not allowed' });
   }
 
-  // Connect to database
-  const client = new Client({ connectionString: DB_URL });
-  
-  try {
-    await client.connect();
+  const { url, filename } = req.query;
 
-    // Check if record exists
-    const result = await client.query('SELECT * FROM files WHERE id = $1', [id]);
+  if (!url) {
+    return res.status(400).json({ ok: false, error: 'URL parameter is required' });
+  }
+
+  const fileName = filename || `file_${Date.now()}`;
+
+  try {
+    // Download file from Telegram
+    const fileResponse = await fetch(url);
     
-    if (result.rows.length === 0) {
-      await client.end();
-      return res.status(404).json({ success: false, error: "Record not found" });
+    if (!fileResponse.ok) {
+      return res.status(400).json({ ok: false, error: 'Failed to download file from Telegram' });
     }
 
-    const fileRecord = result.rows[0];
-    const telegramUrl = fileRecord.telegram_url;
-    const fileName = fileRecord.file_name;
-
-    // Download file from Telegram
-    const fileResponse = await fetch(telegramUrl);
-    const fileBuffer = await fileResponse.arrayBuffer();
-    const fileBlob = new Blob([fileBuffer]);
+    const fileBuffer = await fileResponse.buffer();
+    const servers = {};
 
     // Upload to Pixeldrain
-    let pixeldrainUrl = "";
     try {
       const formData = new FormData();
-      formData.append('file', fileBlob, fileName);
+      formData.append('file', fileBuffer, { filename: fileName });
 
       const pixeldrainRes = await fetch('https://pixeldrain.com/api/file', {
         method: 'POST',
         headers: {
           'Authorization': `Basic ${Buffer.from(`:${PIXELDRAIN_API_KEY}`).toString('base64')}`,
+          ...formData.getHeaders()
         },
         body: formData
       });
@@ -51,43 +46,44 @@ export default async function handler(req, res) {
       const pixeldrainData = await pixeldrainRes.json();
 
       if (pixeldrainData.success && pixeldrainData.id) {
-        pixeldrainUrl = `https://pixeldrain.com/u/${pixeldrainData.id}`;
+        servers["1"] = `https://pixeldrain.com/u/${pixeldrainData.id}`;
       }
     } catch (error) {
-      console.error("Pixeldrain error:", error);
+      console.error('Pixeldrain upload error:', error);
     }
 
     // Upload to DevUploads
-    let devuploadsUrl = "";
     try {
       const formData = new FormData();
-      formData.append('file', fileBlob, fileName);
+      formData.append('file', fileBuffer, { filename: fileName });
 
       const devuploadsRes = await fetch(`https://devuploads.com/api/upload?key=${DEVUPLOADS_API_KEY}`, {
         method: 'POST',
+        headers: formData.getHeaders(),
         body: formData
       });
 
       const devuploadsData = await devuploadsRes.json();
 
       if (devuploadsData.status === 200 && devuploadsData.data && devuploadsData.data.url) {
-        devuploadsUrl = devuploadsData.data.url;
+        servers["2"] = devuploadsData.data.url;
       }
     } catch (error) {
-      console.error("DevUploads error:", error);
+      console.error('DevUploads upload error:', error);
     }
 
-    await client.end();
-
+    // Return response
     return res.status(200).json({
-      success: true,
-      server1: pixeldrainUrl,
-      server2: devuploadsUrl
+      ok: true,
+      servers: servers
     });
 
   } catch (error) {
-    console.error("Error:", error);
-    await client.end();
-    return res.status(500).json({ success: false, error: error.message });
+    console.error('Mirror API error:', error);
+    return res.status(500).json({ 
+      ok: false, 
+      error: 'Internal server error',
+      message: error.message 
+    });
   }
 }
