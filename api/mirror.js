@@ -1,10 +1,7 @@
-import FormData from 'form-data';
-import fetch from 'node-fetch';
-
-const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
-const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
-
 export default async function handler(req, res) {
+  const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
+  const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
+
   // Only allow GET requests
   if (req.method !== 'GET') {
     return res.status(405).json({ ok: false, error: 'Method not allowed' });
@@ -17,28 +14,22 @@ export default async function handler(req, res) {
   }
 
   const fileName = filename || `file_${Date.now()}`;
+  const servers = {};
 
+  // ========== PIXELDRAIN UPLOAD ==========
   try {
-    // Download file from Telegram
-    const fileResponse = await fetch(url);
+    const formData = new FormData();
     
-    if (!fileResponse.ok) {
-      return res.status(400).json({ ok: false, error: 'Failed to download file from Telegram' });
-    }
-
-    const fileBuffer = await fileResponse.buffer();
-    const servers = {};
-
-    // Upload to Pixeldrain
-    try {
-      const formData = new FormData();
-      formData.append('file', fileBuffer, { filename: fileName });
+    // Fetch file and create blob
+    const fileResponse = await fetch(url);
+    if (fileResponse.ok) {
+      const fileBlob = await fileResponse.blob();
+      formData.append('file', fileBlob, fileName);
 
       const pixeldrainRes = await fetch('https://pixeldrain.com/api/file', {
         method: 'POST',
         headers: {
-          'Authorization': `Basic ${Buffer.from(`:${PIXELDRAIN_API_KEY}`).toString('base64')}`,
-          ...formData.getHeaders()
+          'Authorization': `Basic ${Buffer.from(`:${PIXELDRAIN_API_KEY}`).toString('base64')}`
         },
         body: formData
       });
@@ -46,44 +37,50 @@ export default async function handler(req, res) {
       const pixeldrainData = await pixeldrainRes.json();
 
       if (pixeldrainData.success && pixeldrainData.id) {
-        servers["1"] = `https://pixeldrain.com/u/${pixeldrainData.id}`;
+        servers["pixeldrain"] = `https://pixeldrain.com/u/${pixeldrainData.id}`;
       }
-    } catch (error) {
-      console.error('Pixeldrain upload error:', error);
     }
+  } catch (error) {
+    console.error('Pixeldrain upload error:', error.message);
+  }
 
-    // Upload to DevUploads
-    try {
-      const formData = new FormData();
-      formData.append('file', fileBuffer, { filename: fileName });
+  // ========== DEVUPLOADS UPLOAD ==========
+  try {
+    // Step 1: Get upload server
+    const serverRes = await fetch(
+      `https://devuploads.com/api/upload/server?key=${DEVUPLOADS_API_KEY}`
+    );
+    const serverData = await serverRes.json();
 
-      const devuploadsRes = await fetch(`https://devuploads.com/api/upload?key=${DEVUPLOADS_API_KEY}`, {
+    if (serverData.status === 200 && serverData.result) {
+      const uploadServer = serverData.result;
+
+      // Step 2: Upload file using URL (remote upload)
+      const uploadRes = await fetch(`${uploadServer}/upload`, {
         method: 'POST',
-        headers: formData.getHeaders(),
-        body: formData
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          key: DEVUPLOADS_API_KEY,
+          url: url,
+          public: '1'
+        })
       });
 
-      const devuploadsData = await devuploadsRes.json();
+      const uploadData = await uploadRes.json();
 
-      if (devuploadsData.status === 200 && devuploadsData.data && devuploadsData.data.url) {
-        servers["2"] = devuploadsData.data.url;
+      if (uploadData.status === 200 && uploadData.result && uploadData.result.link) {
+        servers["devuploads"] = uploadData.result.link;
       }
-    } catch (error) {
-      console.error('DevUploads upload error:', error);
     }
-
-    // Return response
-    return res.status(200).json({
-      ok: true,
-      servers: servers
-    });
-
   } catch (error) {
-    console.error('Mirror API error:', error);
-    return res.status(500).json({ 
-      ok: false, 
-      error: 'Internal server error',
-      message: error.message 
-    });
+    console.error('DevUploads upload error:', error.message);
   }
+
+  // Return response
+  return res.status(200).json({
+    ok: true,
+    servers: servers
+  });
 }
