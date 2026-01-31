@@ -27,7 +27,7 @@ export default {
         "👋 Welcome to QuickURL Bot\n\n" +
         "📤 Send or forward any file\n" +
         "🔗 I'll generate a public Telegram link instantly\n" +
-        "🪞 Plus mirror on multiple servers (Pixeldrain, DevUploads)\n\n" +
+        "🪞 Plus mirror on multiple servers\n\n" +
         "⚡ Powered by @quickURL_files"
       );
       return new Response("Start handled");
@@ -120,21 +120,6 @@ export default {
       console.error("Error getting file URL:", error);
     }
 
-    // --- Send to Vercel Mirror API ---
-    let mirrorUrls = {};
-    if (directUrl) {
-      try {
-        const mirrorRes = await fetch(`${VERCEL_MIRROR_API}?url=${encodeURIComponent(directUrl)}&filename=${encodeURIComponent(fileName)}`);
-        const mirrorData = await mirrorRes.json();
-        
-        if (mirrorData.ok) {
-          mirrorUrls = mirrorData.servers || {};
-        }
-      } catch (error) {
-        console.error("Mirror API error:", error);
-      }
-    }
-
     // --- Send caption to channel ---
     const caption =
       `${fileEmoji} ${fileType}\n\n` +
@@ -158,32 +143,52 @@ export default {
 
     const publicUrl = `https://t.me/${channelUsername}/${channelMsgId}`;
 
-    // --- Success reply to user ---
+    // --- Send initial success message ---
     let successMessage = 
       "✅ Uploaded to QuickURL\n\n" +
-      `🔗 Telegram Link:\n${publicUrl}\n\n`;
-    
-    // Add mirror links
-    if (mirrorUrls["1"]) {
-      successMessage += `🪞 Pixeldrain Mirror:\n${mirrorUrls["1"]}\n\n`;
-    }
-    
-    if (mirrorUrls["2"]) {
-      successMessage += `🪞 DevUploads Mirror:\n${mirrorUrls["2"]}\n\n`;
-    }
-    
-    successMessage += 
+      `🔗 Telegram Link:\n${publicUrl}\n\n` +
       `📋 Details:\n` +
       `${fileEmoji} Type: ${fileType}\n` +
       `📦 Size: ${fileSize}\n` +
       `⏰ Uploaded: ${uploadTime}\n\n` +
+      `🪞 Mirroring in progress...\n\n` +
       `📮 Join @quickURL_files`;
 
-    await sendMessage(
-      BOT_TOKEN,
-      chatId,
-      successMessage
-    );
+    const sentMsg = await sendMessageWithReturn(BOT_TOKEN, chatId, successMessage);
+    const sentMsgId = sentMsg?.result?.message_id;
+
+    // --- Send to Vercel Mirror API (async, non-blocking) ---
+    if (directUrl && sentMsgId) {
+      // Don't await - let it run in background
+      fetch(`${VERCEL_MIRROR_API}?url=${encodeURIComponent(directUrl)}&filename=${encodeURIComponent(fileName)}`)
+        .then(res => res.json())
+        .then(mirrorData => {
+          if (mirrorData.ok && mirrorData.servers) {
+            let mirrorMessage = 
+              "✅ Uploaded to QuickURL\n\n" +
+              `🔗 Telegram Link:\n${publicUrl}\n\n`;
+            
+            if (mirrorData.servers["1"]) {
+              mirrorMessage += `🪞 Pixeldrain Mirror:\n${mirrorData.servers["1"]}\n\n`;
+            }
+            
+            if (mirrorData.servers["2"]) {
+              mirrorMessage += `🪞 DevUploads Mirror:\n${mirrorData.servers["2"]}\n\n`;
+            }
+            
+            mirrorMessage += 
+              `📋 Details:\n` +
+              `${fileEmoji} Type: ${fileType}\n` +
+              `📦 Size: ${fileSize}\n` +
+              `⏰ Uploaded: ${uploadTime}\n\n` +
+              `📮 Join @quickURL_files`;
+
+            // Update the message with mirror links
+            editMessage(BOT_TOKEN, chatId, sentMsgId, mirrorMessage);
+          }
+        })
+        .catch(err => console.error("Mirror error:", err));
+    }
 
     return new Response("Done");
   }
@@ -196,6 +201,34 @@ async function sendMessage(botToken, chatId, text) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: chatId,
+      text,
+      disable_web_page_preview: true
+    })
+  });
+}
+
+async function sendMessageWithReturn(botToken, chatId, text) {
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true
+    })
+  });
+  return await response.json();
+}
+
+async function editMessage(botToken, chatId, messageId, text) {
+  const url = `https://api.telegram.org/bot${botToken}/editMessageText`;
+  await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
       text,
       disable_web_page_preview: true
     })
