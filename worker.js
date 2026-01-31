@@ -2,7 +2,7 @@ export default {
   async fetch(request) {
     const BOT_TOKEN = "8214031086:AAEDlY1VVTTv-FklSHl0sgFmi_k-T1IQbbs";
     const PUBLIC_CHANNEL = "@quickURL_files";
-    const VERCEL_MIRROR_API = "https://quickurl-bot.vercel.app/api/mirror";
+    const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
 
     if (request.method !== "POST") {
       return new Response("OK");
@@ -27,7 +27,7 @@ export default {
         "👋 Welcome to QuickURL Bot\n\n" +
         "📤 Send or forward any file\n" +
         "🔗 I'll generate a public Telegram link instantly\n" +
-        "🪞 Plus mirror on multiple servers (Pixeldrain, DevUploads)\n\n" +
+        "🪞 Plus mirror on Pixeldrain for direct download\n\n" +
         "⚡ Powered by @quickURL_files"
       );
       return new Response("Start handled");
@@ -85,18 +85,43 @@ export default {
     const username = message.from.username ? `@${message.from.username}` : message.from.first_name || "Anonymous";
     const uploadTime = formatTime(message.date);
 
-    // --- Send processing message ---
-    const processingMsg = await fetch(`${tgApi}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: "⏳ Processing your file...\n🔄 Uploading to servers...",
-        disable_web_page_preview: true
-      })
-    });
-    const processingData = await processingMsg.json();
-    const processingMsgId = processingData.result?.message_id;
+    // --- Upload to Pixeldrain ---
+    let pixeldrainUrl = "";
+    try {
+      // Get file path from Telegram
+      const filePathRes = await fetch(`${tgApi}/getFile?file_id=${fileId}`);
+      const filePathData = await filePathRes.json();
+      
+      if (filePathData.ok) {
+        const filePath = filePathData.result.file_path;
+        const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+        
+        // Download file from Telegram
+        const fileResponse = await fetch(fileUrl);
+        const fileBlob = await fileResponse.blob();
+        
+        // Upload to Pixeldrain
+        const formData = new FormData();
+        formData.append('file', fileBlob, fileName);
+        
+        const pixeldrainRes = await fetch('https://pixeldrain.com/api/file', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Basic ${btoa(`:${PIXELDRAIN_API_KEY}`)}`,
+          },
+          body: formData
+        });
+        
+        const pixeldrainData = await pixeldrainRes.json();
+        
+        if (pixeldrainData.success && pixeldrainData.id) {
+          pixeldrainUrl = `https://pixeldrain.com/u/${pixeldrainData.id}`;
+        }
+      }
+    } catch (error) {
+      console.error("Pixeldrain upload error:", error);
+      pixeldrainUrl = "Upload failed";
+    }
 
     // --- First, send the file to channel ---
     const copyRes = await fetch(`${tgApi}/copyMessage`, {
@@ -112,53 +137,14 @@ export default {
     const copyData = await copyRes.json();
 
     if (!copyData.ok) {
-      if (processingMsgId) {
-        await fetch(`${tgApi}/deleteMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: chatId,
-            message_id: processingMsgId
-          })
-        });
-      }
       await sendMessage(BOT_TOKEN, chatId, "❌ Upload failed. Try again.");
       return new Response("Copy failed");
     }
 
     const channelMsgId = copyData.result.message_id;
+
+    // --- Now send the caption as a separate message ---
     const channelUsername = PUBLIC_CHANNEL.replace("@", "");
-
-    // --- Get Telegram direct file URL ---
-    let directUrl = "";
-    try {
-      const filePathRes = await fetch(`${tgApi}/getFile?file_id=${fileId}`);
-      const filePathData = await filePathRes.json();
-      
-      if (filePathData.ok) {
-        const filePath = filePathData.result.file_path;
-        directUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
-      }
-    } catch (error) {
-      console.error("Error getting file URL:", error);
-    }
-
-    // --- Send to Vercel Mirror API ---
-    let mirrorUrls = {};
-    if (directUrl) {
-      try {
-        const mirrorRes = await fetch(`${VERCEL_MIRROR_API}?url=${encodeURIComponent(directUrl)}&filename=${encodeURIComponent(fileName)}`);
-        const mirrorData = await mirrorRes.json();
-        
-        if (mirrorData.ok) {
-          mirrorUrls = mirrorData.servers || {};
-        }
-      } catch (error) {
-        console.error("Mirror API error:", error);
-      }
-    }
-
-    // --- Send caption to channel ---
     const caption =
       `${fileEmoji} ${fileType}\n\n` +
       `📝 TITLE: ${fileName}\n` +
@@ -181,38 +167,20 @@ export default {
 
     const publicUrl = `https://t.me/${channelUsername}/${channelMsgId}`;
 
-    // --- Delete processing message and send success ---
-    if (processingMsgId) {
-      await fetch(`${tgApi}/deleteMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          message_id: processingMsgId
-        })
-      });
-    }
-
     // --- Success reply to user ---
     let successMessage = 
-      "✅ Uploaded Successfully\n\n" +
-      `🔗 Telegram Link:\n${publicUrl}\n\n`;
-    
-    // Add mirror links
-    if (mirrorUrls["pixeldrain"]) {
-      successMessage += `🪞 Pixeldrain Mirror:\n${mirrorUrls["pixeldrain"]}\n\n`;
-    }
-    
-    if (mirrorUrls["devuploads"]) {
-      successMessage += `🪞 DevUploads Mirror:\n${mirrorUrls["devuploads"]}\n\n`;
-    }
-    
-    successMessage += 
+      "✅ Uploaded to QuickURL\n\n" +
+      `🔗 File Link:\n${publicUrl}\n\n` +
       `📋 Details:\n` +
       `${fileEmoji} Type: ${fileType}\n` +
       `📦 Size: ${fileSize}\n` +
-      `⏰ Uploaded: ${uploadTime}\n\n` +
-      `📮 Join @quickURL_files`;
+      `⏰ Uploaded: ${uploadTime}\n\n`;
+    
+    if (pixeldrainUrl && pixeldrainUrl !== "Upload failed") {
+      successMessage += `🪞 Mirror Link:\n${pixeldrainUrl}\n\n`;
+    }
+    
+    successMessage += `📮 Join @quickURL_files`;
 
     await sendMessage(
       BOT_TOKEN,
