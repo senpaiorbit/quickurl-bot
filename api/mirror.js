@@ -3,9 +3,12 @@
 const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
 const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
 
+const GOFILE_TOKEN = "EDlLlbUnWv00p78YoEetu2ziisd4wkRW";
+const GOFILE_FOLDER_ID = "9fff4533-7a87-405d-a20a-f75c938ff904";
+
 const CACHE_TTL = 10 * 60 * 1000;
-const uploadCache = global.uploadCache || new Map();
-global.uploadCache = uploadCache;
+const cache = global.uploadCache || new Map();
+global.uploadCache = cache;
 
 export default async function handler(req, res) {
   if (req.method !== "GET") {
@@ -13,16 +16,12 @@ export default async function handler(req, res) {
   }
 
   const { url, filename } = req.query;
-
   if (!url || !/^https?:\/\//i.test(url)) {
     return res.status(400).json({ ok: false, error: "Valid ?url= required" });
   }
 
   const now = Date.now();
-  const cacheKey = url;
-
-  // ===== CACHE CHECK =====
-  const cached = uploadCache.get(cacheKey);
+  const cached = cache.get(url);
   if (cached && now - cached.time < CACHE_TTL) {
     return res.json({ ok: true, cached: true, servers: cached.servers });
   }
@@ -30,23 +29,23 @@ export default async function handler(req, res) {
   const servers = {};
   const fileName = filename || `file_${Date.now()}`;
 
-  // ===== FETCH FILE ONCE =====
-  let fileBuffer;
+  // ================= FETCH FILE ONCE =================
+  let buffer;
   try {
     const r = await fetch(url, { redirect: "follow" });
-    if (!r.ok) throw new Error("File fetch failed");
-    fileBuffer = Buffer.from(await r.arrayBuffer());
-  } catch (e) {
+    if (!r.ok) throw new Error("Fetch failed");
+    buffer = Buffer.from(await r.arrayBuffer());
+  } catch {
     return res.status(400).json({
       ok: false,
-      error: "Source file is not reachable by server"
+      error: "Source URL blocked server-side download"
     });
   }
 
-  // ===== PIXELDRAIN =====
+  // ================= PIXELDRAIN =================
   try {
     const form = new FormData();
-    form.append("file", new Blob([fileBuffer]), fileName);
+    form.append("file", new Blob([buffer]), fileName);
 
     const r = await fetch("https://pixeldrain.com/api/file", {
       method: "POST",
@@ -62,9 +61,9 @@ export default async function handler(req, res) {
     if (j?.success && j?.id) {
       servers.pixeldrain = `https://pixeldrain.com/u/${j.id}`;
     }
-  } catch (_) {}
+  } catch {}
 
-  // ===== DEVUPLOADS =====
+  // ================= DEVUPLOADS (REMOTE UPLOAD) =================
   try {
     const s = await fetch(
       `https://devuploads.com/api/upload/server?key=${DEVUPLOADS_API_KEY}`
@@ -84,19 +83,22 @@ export default async function handler(req, res) {
         servers.devuploads = r.result.link;
       }
     }
-  } catch (_) {}
+  } catch {}
 
-  // ===== GOFILE (CORRECT WAY) =====
+  // ================= GOFILE (TOKEN + FOLDER) =================
   try {
-    const s = await fetch("https://api.gofile.io/getServer")
-      .then(r => r.json());
+    const serverRes = await fetch(
+      `https://api.gofile.io/getServer?token=${GOFILE_TOKEN}`
+    ).then(r => r.json());
 
-    if (s?.status === "ok") {
+    if (serverRes?.status === "ok") {
       const form = new FormData();
-      form.append("file", new Blob([fileBuffer]), fileName);
+      form.append("file", new Blob([buffer]), fileName);
+      form.append("token", GOFILE_TOKEN);
+      form.append("folderId", GOFILE_FOLDER_ID);
 
       const r = await fetch(
-        `https://${s.data.server}.gofile.io/uploadFile`,
+        `https://${serverRes.data.server}.gofile.io/uploadFile`,
         { method: "POST", body: form }
       ).then(r => r.json());
 
@@ -104,18 +106,18 @@ export default async function handler(req, res) {
         servers.gofile = r.data.downloadPage;
       }
     }
-  } catch (_) {}
+  } catch {}
 
-  // ===== FINAL VALIDATION =====
+  // ================= FINAL VALIDATION =================
   if (Object.keys(servers).length === 0) {
     return res.status(502).json({
       ok: false,
-      error: "All upload providers failed",
-      hint: "Source URL may block server-side downloads"
+      error: "All providers failed",
+      reason: "File host blocks server-side access or size limit exceeded"
     });
   }
 
-  uploadCache.set(cacheKey, { time: now, servers });
+  cache.set(url, { time: now, servers });
 
   return res.json({
     ok: true,
