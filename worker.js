@@ -2,7 +2,7 @@ export default {
   async fetch(request) {
     const BOT_TOKEN = "8214031086:AAEDlY1VVTTv-FklSHl0sgFmi_k-T1IQbbs";
     const PUBLIC_CHANNEL = "@quickURL_files";
-    const VERCEL_API_URL = "https://your-vercel-app.vercel.app/api/mirror";
+    const VERCEL_API_URL = "https://quickurl-bot.vercel.app/api/mirror";
     const DB_URL = "postgresql://postgres.hvopahixclbellzicipi:KbVwuzULdLAnAsNh@aws-1-ap-south-1.pooler.supabase.com:6543/postgres";
 
     if (request.method !== "POST") {
