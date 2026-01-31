@@ -3,10 +3,9 @@
 const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
 const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
 
-// 10 minute cache
 const CACHE_TTL = 10 * 60 * 1000;
 
-// In-memory cache (URL -> result)
+// global cache (serverless-safe best effort)
 const uploadCache = global.uploadCache || new Map();
 global.uploadCache = uploadCache;
 
@@ -18,16 +17,17 @@ export default async function handler(req, res) {
   const { url, filename } = req.query;
 
   if (!url || !/^https?:\/\//i.test(url)) {
-    return res.status(400).json({ ok: false, error: "Valid ?url= is required" });
+    return res.status(400).json({ ok: false, error: "Valid ?url= required" });
   }
 
-  const cacheKey = url;
   const now = Date.now();
+  const cacheKey = url;
 
-  // ================= CACHE CHECK =================
-  if (uploadCache.has(cacheKey)) {
-    const cached = uploadCache.get(cacheKey);
-    if (now - cached.time < CACHE_TTL) {
+  // ================= SAFE CACHE READ =================
+  const cached = uploadCache.get(cacheKey);
+  if (cached && now - cached.time < CACHE_TTL) {
+    // ❗ ignore broken cache
+    if (Object.keys(cached.servers).length > 0) {
       return res.status(200).json({
         ok: true,
         cached: true,
@@ -38,8 +38,8 @@ export default async function handler(req, res) {
     }
   }
 
-  const fileName = filename || `file_${Date.now()}`;
   const servers = {};
+  const fileName = filename || `file_${Date.now()}`;
 
   // ================= PIXELDRAIN =================
   try {
@@ -60,7 +60,7 @@ export default async function handler(req, res) {
       });
 
       const j = await r.json();
-      if (j.success && j.id) {
+      if (j?.success && j?.id) {
         servers.pixeldrain = `https://pixeldrain.com/u/${j.id}`;
       }
     }
@@ -91,26 +91,28 @@ export default async function handler(req, res) {
 
   // ================= GOFILE (3 SERVERS) =================
   try {
-    const gofileServers = ["store1", "store2", "store3"];
-    for (const s of gofileServers) {
+    const gofileStores = ["store1", "store2", "store3"];
+    for (const s of gofileStores) {
       const r = await fetch(`https://${s}.gofile.io/uploadFile`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ url })
       }).then(r => r.json());
 
-      if (r?.status === "ok" && r.data?.downloadPage) {
+      if (r?.status === "ok" && r?.data?.downloadPage) {
         servers.gofile = r.data.downloadPage;
         break;
       }
     }
   } catch (_) {}
 
-  // ================= SAVE CACHE =================
-  uploadCache.set(cacheKey, {
-    time: now,
-    servers
-  });
+  // ================= CACHE ONLY IF VALID =================
+  if (Object.keys(servers).length > 0) {
+    uploadCache.set(cacheKey, {
+      time: now,
+      servers
+    });
+  }
 
   return res.status(200).json({
     ok: true,
