@@ -1,86 +1,120 @@
-export default async function handler(req, res) {
-  const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
-  const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
+// /api/upload.js
 
-  // Only allow GET requests
-  if (req.method !== 'GET') {
-    return res.status(405).json({ ok: false, error: 'Method not allowed' });
+const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
+const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
+
+// 10 minute cache
+const CACHE_TTL = 10 * 60 * 1000;
+
+// In-memory cache (URL -> result)
+const uploadCache = global.uploadCache || new Map();
+global.uploadCache = uploadCache;
+
+export default async function handler(req, res) {
+  if (req.method !== "GET") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
   const { url, filename } = req.query;
 
-  if (!url) {
-    return res.status(400).json({ ok: false, error: 'URL parameter is required' });
+  if (!url || !/^https?:\/\//i.test(url)) {
+    return res.status(400).json({ ok: false, error: "Valid ?url= is required" });
+  }
+
+  const cacheKey = url;
+  const now = Date.now();
+
+  // ================= CACHE CHECK =================
+  if (uploadCache.has(cacheKey)) {
+    const cached = uploadCache.get(cacheKey);
+    if (now - cached.time < CACHE_TTL) {
+      return res.status(200).json({
+        ok: true,
+        cached: true,
+        servers: cached.servers
+      });
+    } else {
+      uploadCache.delete(cacheKey);
+    }
   }
 
   const fileName = filename || `file_${Date.now()}`;
   const servers = {};
 
-  // ========== PIXELDRAIN UPLOAD ==========
+  // ================= PIXELDRAIN =================
   try {
-    const formData = new FormData();
-    
-    // Fetch file and create blob
-    const fileResponse = await fetch(url);
-    if (fileResponse.ok) {
-      const fileBlob = await fileResponse.blob();
-      formData.append('file', fileBlob, fileName);
+    const fileRes = await fetch(url);
+    if (fileRes.ok) {
+      const blob = await fileRes.blob();
+      const form = new FormData();
+      form.append("file", blob, fileName);
 
-      const pixeldrainRes = await fetch('https://pixeldrain.com/api/file', {
-        method: 'POST',
+      const r = await fetch("https://pixeldrain.com/api/file", {
+        method: "POST",
         headers: {
-          'Authorization': `Basic ${Buffer.from(`:${PIXELDRAIN_API_KEY}`).toString('base64')}`
+          Authorization:
+            "Basic " +
+            Buffer.from(":" + PIXELDRAIN_API_KEY).toString("base64")
         },
-        body: formData
+        body: form
       });
 
-      const pixeldrainData = await pixeldrainRes.json();
-
-      if (pixeldrainData.success && pixeldrainData.id) {
-        servers["pixeldrain"] = `https://pixeldrain.com/u/${pixeldrainData.id}`;
+      const j = await r.json();
+      if (j.success && j.id) {
+        servers.pixeldrain = `https://pixeldrain.com/u/${j.id}`;
       }
     }
-  } catch (error) {
-    console.error('Pixeldrain upload error:', error.message);
-  }
+  } catch (_) {}
 
-  // ========== DEVUPLOADS UPLOAD ==========
+  // ================= DEVUPLOADS =================
   try {
-    // Step 1: Get upload server
-    const serverRes = await fetch(
+    const s = await fetch(
       `https://devuploads.com/api/upload/server?key=${DEVUPLOADS_API_KEY}`
-    );
-    const serverData = await serverRes.json();
+    ).then(r => r.json());
 
-    if (serverData.status === 200 && serverData.result) {
-      const uploadServer = serverData.result;
-
-      // Step 2: Upload file using URL (remote upload)
-      const uploadRes = await fetch(`${uploadServer}/upload`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
+    if (s?.result) {
+      const r = await fetch(`${s.result}/upload`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           key: DEVUPLOADS_API_KEY,
-          url: url,
-          public: '1'
+          url,
+          public: "1"
         })
-      });
+      }).then(r => r.json());
 
-      const uploadData = await uploadRes.json();
-
-      if (uploadData.status === 200 && uploadData.result && uploadData.result.link) {
-        servers["devuploads"] = uploadData.result.link;
+      if (r?.result?.link) {
+        servers.devuploads = r.result.link;
       }
     }
-  } catch (error) {
-    console.error('DevUploads upload error:', error.message);
-  }
+  } catch (_) {}
 
-  // Return response
+  // ================= GOFILE (3 SERVERS) =================
+  try {
+    const gofileServers = ["store1", "store2", "store3"];
+    for (const s of gofileServers) {
+      const r = await fetch(`https://${s}.gofile.io/uploadFile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ url })
+      }).then(r => r.json());
+
+      if (r?.status === "ok" && r.data?.downloadPage) {
+        servers.gofile = r.data.downloadPage;
+        break;
+      }
+    }
+  } catch (_) {}
+
+  // ================= SAVE CACHE =================
+  uploadCache.set(cacheKey, {
+    time: now,
+    servers
+  });
+
   return res.status(200).json({
     ok: true,
-    servers: servers
+    cached: false,
+    servers
   });
 }
