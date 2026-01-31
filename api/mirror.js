@@ -4,8 +4,6 @@ const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
 const DEVUPLOADS_API_KEY = "1240962gatdo40wtrx6qce";
 
 const CACHE_TTL = 10 * 60 * 1000;
-
-// global cache (serverless-safe best effort)
 const uploadCache = global.uploadCache || new Map();
 global.uploadCache = uploadCache;
 
@@ -23,50 +21,50 @@ export default async function handler(req, res) {
   const now = Date.now();
   const cacheKey = url;
 
-  // ================= SAFE CACHE READ =================
+  // ===== CACHE CHECK =====
   const cached = uploadCache.get(cacheKey);
   if (cached && now - cached.time < CACHE_TTL) {
-    // ❗ ignore broken cache
-    if (Object.keys(cached.servers).length > 0) {
-      return res.status(200).json({
-        ok: true,
-        cached: true,
-        servers: cached.servers
-      });
-    } else {
-      uploadCache.delete(cacheKey);
-    }
+    return res.json({ ok: true, cached: true, servers: cached.servers });
   }
 
   const servers = {};
   const fileName = filename || `file_${Date.now()}`;
 
-  // ================= PIXELDRAIN =================
+  // ===== FETCH FILE ONCE =====
+  let fileBuffer;
   try {
-    const fileRes = await fetch(url);
-    if (fileRes.ok) {
-      const blob = await fileRes.blob();
-      const form = new FormData();
-      form.append("file", blob, fileName);
+    const r = await fetch(url, { redirect: "follow" });
+    if (!r.ok) throw new Error("File fetch failed");
+    fileBuffer = Buffer.from(await r.arrayBuffer());
+  } catch (e) {
+    return res.status(400).json({
+      ok: false,
+      error: "Source file is not reachable by server"
+    });
+  }
 
-      const r = await fetch("https://pixeldrain.com/api/file", {
-        method: "POST",
-        headers: {
-          Authorization:
-            "Basic " +
-            Buffer.from(":" + PIXELDRAIN_API_KEY).toString("base64")
-        },
-        body: form
-      });
+  // ===== PIXELDRAIN =====
+  try {
+    const form = new FormData();
+    form.append("file", new Blob([fileBuffer]), fileName);
 
-      const j = await r.json();
-      if (j?.success && j?.id) {
-        servers.pixeldrain = `https://pixeldrain.com/u/${j.id}`;
-      }
+    const r = await fetch("https://pixeldrain.com/api/file", {
+      method: "POST",
+      headers: {
+        Authorization:
+          "Basic " +
+          Buffer.from(":" + PIXELDRAIN_API_KEY).toString("base64")
+      },
+      body: form
+    });
+
+    const j = await r.json();
+    if (j?.success && j?.id) {
+      servers.pixeldrain = `https://pixeldrain.com/u/${j.id}`;
     }
   } catch (_) {}
 
-  // ================= DEVUPLOADS =================
+  // ===== DEVUPLOADS =====
   try {
     const s = await fetch(
       `https://devuploads.com/api/upload/server?key=${DEVUPLOADS_API_KEY}`
@@ -75,7 +73,6 @@ export default async function handler(req, res) {
     if (s?.result) {
       const r = await fetch(`${s.result}/upload`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           key: DEVUPLOADS_API_KEY,
           url,
@@ -89,32 +86,38 @@ export default async function handler(req, res) {
     }
   } catch (_) {}
 
-  // ================= GOFILE (3 SERVERS) =================
+  // ===== GOFILE (CORRECT WAY) =====
   try {
-    const gofileStores = ["store1", "store2", "store3"];
-    for (const s of gofileStores) {
-      const r = await fetch(`https://${s}.gofile.io/uploadFile`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ url })
-      }).then(r => r.json());
+    const s = await fetch("https://api.gofile.io/getServer")
+      .then(r => r.json());
 
-      if (r?.status === "ok" && r?.data?.downloadPage) {
+    if (s?.status === "ok") {
+      const form = new FormData();
+      form.append("file", new Blob([fileBuffer]), fileName);
+
+      const r = await fetch(
+        `https://${s.data.server}.gofile.io/uploadFile`,
+        { method: "POST", body: form }
+      ).then(r => r.json());
+
+      if (r?.status === "ok") {
         servers.gofile = r.data.downloadPage;
-        break;
       }
     }
   } catch (_) {}
 
-  // ================= CACHE ONLY IF VALID =================
-  if (Object.keys(servers).length > 0) {
-    uploadCache.set(cacheKey, {
-      time: now,
-      servers
+  // ===== FINAL VALIDATION =====
+  if (Object.keys(servers).length === 0) {
+    return res.status(502).json({
+      ok: false,
+      error: "All upload providers failed",
+      hint: "Source URL may block server-side downloads"
     });
   }
 
-  return res.status(200).json({
+  uploadCache.set(cacheKey, { time: now, servers });
+
+  return res.json({
     ok: true,
     cached: false,
     servers
