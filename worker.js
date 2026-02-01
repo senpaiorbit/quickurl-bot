@@ -2,6 +2,8 @@ export default {
   async fetch(request) {
     const BOT_TOKEN = "8214031086:AAEDlY1VVTTv-FklSHl0sgFmi_k-T1IQbbs";
     const PUBLIC_CHANNEL = "@quickURL_files";
+
+    const GOFILE_TOKEN = "EDlLlbUnWv00p78YoEetu2ziisd4wkRW";
     const PIXELDRAIN_API_KEY = "cc3b6605-22c9-4ee6-a826-54bc62621d81";
 
     if (request.method !== "POST") {
@@ -9,121 +11,112 @@ export default {
     }
 
     const update = await request.json();
-
-    if (!update.message) {
-      return new Response("No message");
-    }
+    if (!update.message) return new Response("No message");
 
     const message = update.message;
     const chatId = message.chat.id;
     const msgId = message.message_id;
     const text = message.text || "";
 
-    // --- /start command ---
+    const tgApi = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+    /* ---------------- START COMMAND ---------------- */
     if (text.startsWith("/start")) {
-      await sendMessage(
-        BOT_TOKEN,
-        chatId,
+      await sendMessage(BOT_TOKEN, chatId,
         "👋 Welcome to QuickURL Bot\n\n" +
-        "📤 Send or forward any file\n" +
-        "🔗 I'll generate a public Telegram link instantly\n" +
-        "🪞 Plus mirror on Pixeldrain for direct download\n\n" +
+        "📤 Send any file\n" +
+        "🪞 Mirror: GoFile (primary) + Pixeldrain (backup)\n" +
         "⚡ Powered by @quickURL_files"
       );
-      return new Response("Start handled");
+      return new Response("start ok");
     }
 
-    // --- Only handle files ---
-    const hasFile =
+    /* ---------------- FILE CHECK ---------------- */
+    const fileObj =
       message.document ||
       message.video ||
       message.audio ||
-      message.photo;
+      (message.photo && message.photo.at(-1));
 
-    if (!hasFile) {
-      await sendMessage(
-        BOT_TOKEN,
-        chatId,
-        "❗ Please send or forward a file.\n\n" +
-        "✅ Supported: documents, videos, audio, photos."
-      );
-      return new Response("No file");
+    if (!fileObj) {
+      await sendMessage(BOT_TOKEN, chatId, "❗ Please send a file.");
+      return new Response("no file");
     }
 
-    const tgApi = `https://api.telegram.org/bot${BOT_TOKEN}`;
+    const fileId = fileObj.file_id;
+    const fileName = fileObj.file_name || `file_${Date.now()}`;
 
-    // --- Get file information ---
-    let fileInfo = {};
-    let fileType = "";
-    let fileEmoji = "";
-    let fileId = "";
+    /* ---------------- GET FILE PATH ---------------- */
+    const filePathRes = await fetch(`${tgApi}/getFile?file_id=${fileId}`);
+    const filePathData = await filePathRes.json();
 
-    if (message.document) {
-      fileInfo = message.document;
-      fileType = "Document";
-      fileEmoji = "📄";
-      fileId = message.document.file_id;
-    } else if (message.video) {
-      fileInfo = message.video;
-      fileType = "Video";
-      fileEmoji = "🎥";
-      fileId = message.video.file_id;
-    } else if (message.audio) {
-      fileInfo = message.audio;
-      fileType = "Audio";
-      fileEmoji = "🎵";
-      fileId = message.audio.file_id;
-    } else if (message.photo) {
-      fileInfo = message.photo[message.photo.length - 1];
-      fileType = "Photo";
-      fileEmoji = "🖼️";
-      fileId = message.photo[message.photo.length - 1].file_id;
+    if (!filePathData.ok) {
+      await sendMessage(BOT_TOKEN, chatId, "❌ Failed to fetch file info.");
+      return new Response("getFile failed");
     }
 
-    const fileName = fileInfo.file_name || `${fileType}_${Date.now()}`;
-    const fileSize = formatFileSize(fileInfo.file_size || 0);
-    const username = message.from.username ? `@${message.from.username}` : message.from.first_name || "Anonymous";
-    const uploadTime = formatTime(message.date);
+    const filePath = filePathData.result.file_path;
+    const tgFileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
 
-    // --- Upload to Pixeldrain ---
-    let pixeldrainUrl = "";
+    /* ---------------- STREAM FROM TELEGRAM ---------------- */
+    const tgFileRes = await fetch(tgFileUrl);
+    if (!tgFileRes.ok) {
+      await sendMessage(BOT_TOKEN, chatId, "❌ File download failed.");
+      return new Response("tg download failed");
+    }
+
+    const fileStream = tgFileRes.body;
+
+    let mirrorLink = "";
+    let mirrorSource = "";
+
+    /* ================= GOFILE (PRIMARY) ================= */
     try {
-      // Get file path from Telegram
-      const filePathRes = await fetch(`${tgApi}/getFile?file_id=${fileId}`);
-      const filePathData = await filePathRes.json();
-      
-      if (filePathData.ok) {
-        const filePath = filePathData.result.file_path;
-        const fileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
-        
-        // Download file from Telegram
-        const fileResponse = await fetch(fileUrl);
-        const fileBlob = await fileResponse.blob();
-        
-        // Upload to Pixeldrain
-        const formData = new FormData();
-        formData.append('file', fileBlob, fileName);
-        
-        const pixeldrainRes = await fetch('https://pixeldrain.com/api/file', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Basic ${btoa(`:${PIXELDRAIN_API_KEY}`)}`,
-          },
-          body: formData
-        });
-        
-        const pixeldrainData = await pixeldrainRes.json();
-        
-        if (pixeldrainData.success && pixeldrainData.id) {
-          pixeldrainUrl = `https://pixeldrain.com/u/${pixeldrainData.id}`;
-        }
+      const gofileForm = new FormData();
+      gofileForm.append("token", GOFILE_TOKEN);
+      gofileForm.append("file", fileStream, fileName);
+
+      const gofileRes = await fetch("https://upload.gofile.io/uploadfile", {
+        method: "POST",
+        body: gofileForm
+      });
+
+      const gofileData = await gofileRes.json();
+
+      if (gofileData.status === "ok") {
+        mirrorLink = gofileData.data.downloadPage;
+        mirrorSource = "GoFile";
       }
-    } catch (error) {
-      console.error("Pixeldrain upload error:", error);
-      pixeldrainUrl = "Upload failed";
+    } catch (e) {
+      console.log("GoFile failed");
     }
 
-    // --- First, send the file to channel ---
+    /* ================= PIXELDRAIN (FALLBACK) ================= */
+    if (!mirrorLink) {
+      try {
+        const pdForm = new FormData();
+        pdForm.append("file", fileStream, fileName);
+
+        const pdRes = await fetch("https://pixeldrain.com/api/file", {
+          method: "POST",
+          headers: {
+            "Authorization": `Basic ${btoa(`:${PIXELDRAIN_API_KEY}`)}`
+          },
+          body: pdForm
+        });
+
+        const pdData = await pdRes.json();
+
+        if (pdData.success && pdData.id) {
+          mirrorLink = `https://pixeldrain.com/u/${pdData.id}`;
+          mirrorSource = "Pixeldrain";
+        }
+      } catch (e) {
+        console.log("Pixeldrain failed");
+      }
+    }
+
+    /* ---------------- COPY TO CHANNEL ---------------- */
     const copyRes = await fetch(`${tgApi}/copyMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -135,66 +128,37 @@ export default {
     });
 
     const copyData = await copyRes.json();
-
     if (!copyData.ok) {
-      await sendMessage(BOT_TOKEN, chatId, "❌ Upload failed. Try again.");
-      return new Response("Copy failed");
+      await sendMessage(BOT_TOKEN, chatId, "❌ Channel upload failed.");
+      return new Response("copy failed");
     }
 
     const channelMsgId = copyData.result.message_id;
-
-    // --- Now send the caption as a separate message ---
     const channelUsername = PUBLIC_CHANNEL.replace("@", "");
-    const caption =
-      `${fileEmoji} ${fileType}\n\n` +
-      `📝 TITLE: ${fileName}\n` +
-      `👤 Uploaded by: ${username}\n` +
-      `📦 Size: ${fileSize}\n` +
-      `⏰ Time: ${uploadTime}\n\n` +
-      `🤖 Checkout bot: @QuickURL_roBot\n` +
-      `📢 Join ${PUBLIC_CHANNEL}`;
+    const tgPublicUrl = `https://t.me/${channelUsername}/${channelMsgId}`;
 
-    await fetch(`${tgApi}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: PUBLIC_CHANNEL,
-        text: caption,
-        reply_to_message_id: channelMsgId,
-        disable_web_page_preview: true
-      })
-    });
+    /* ---------------- FINAL MESSAGE ---------------- */
+    let reply =
+      "✅ Upload Successful\n\n" +
+      `🔗 Telegram Link:\n${tgPublicUrl}\n\n`;
 
-    const publicUrl = `https://t.me/${channelUsername}/${channelMsgId}`;
-
-    // --- Success reply to user ---
-    let successMessage = 
-      "✅ Uploaded to QuickURL\n\n" +
-      `🔗 File Link:\n${publicUrl}\n\n` +
-      `📋 Details:\n` +
-      `${fileEmoji} Type: ${fileType}\n` +
-      `📦 Size: ${fileSize}\n` +
-      `⏰ Uploaded: ${uploadTime}\n\n`;
-    
-    if (pixeldrainUrl && pixeldrainUrl !== "Upload failed") {
-      successMessage += `🪞 Mirror Link:\n${pixeldrainUrl}\n\n`;
+    if (mirrorLink) {
+      reply += `🪞 Mirror (${mirrorSource}):\n${mirrorLink}\n\n`;
+    } else {
+      reply += "⚠️ Mirror failed (file too large or rate-limited)\n\n";
     }
-    
-    successMessage += `📮 Join @quickURL_files`;
 
-    await sendMessage(
-      BOT_TOKEN,
-      chatId,
-      successMessage
-    );
+    reply += "📢 @quickURL_files";
 
-    return new Response("Done");
+    await sendMessage(BOT_TOKEN, chatId, reply);
+    return new Response("done");
   }
 };
 
+/* ================= HELPERS ================= */
+
 async function sendMessage(botToken, chatId, text) {
-  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-  await fetch(url, {
+  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -203,22 +167,4 @@ async function sendMessage(botToken, chatId, text) {
       disable_web_page_preview: true
     })
   });
-}
-
-function formatFileSize(bytes) {
-  if (bytes === 0) return "0 Bytes";
-  const k = 1024;
-  const sizes = ["Bytes", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
-}
-
-function formatTime(timestamp) {
-  const date = new Date(timestamp * 1000);
-  const hours = date.getHours().toString().padStart(2, "0");
-  const minutes = date.getMinutes().toString().padStart(2, "0");
-  const day = date.getDate().toString().padStart(2, "0");
-  const month = (date.getMonth() + 1).toString().padStart(2, "0");
-  const year = date.getFullYear();
-  return `${day}/${month}/${year} ${hours}:${minutes}`;
 }
