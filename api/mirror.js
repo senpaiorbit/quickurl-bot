@@ -1,64 +1,57 @@
 export default async function handler(req, res) {
+  const { url } = req.query;
+
+  if (!url) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing ?url parameter"
+    });
+  }
+
+  const GOFILE_TOKEN = process.env.GOFILE_TOKEN;
+
+  if (!GOFILE_TOKEN) {
+    return res.status(500).json({
+      success: false,
+      error: "Server misconfiguration: token missing"
+    });
+  }
+
   try {
-    const fileUrl = req.query.url;
+    const apiUrl = "https://api.gofile.io/uploadByUrl";
 
-    if (!fileUrl) {
-      return res.status(400).json({
-        success: false,
-        error: "Missing ?url parameter"
-      });
-    }
-
-    // ⚠️ Hardcoded credentials (as requested)
-    const GOFILE_ACCOUNT_ID = "9fff4533-7a87-405d-a20a-f75c938ff904";
-    const GOFILE_TOKEN = "EDlLlbUnWv00p78YoEetu2ziisd4wkRW";
-
-    // 1️⃣ Get best server
-    const serverRes = await fetch("https://api.gofile.io/getServer");
-    const serverData = await serverRes.json();
-
-    if (serverData.status !== "ok") {
-      throw new Error("Failed to get GoFile server");
-    }
-
-    const server = serverData.data.server;
-
-    // 2️⃣ Remote upload (URL → GoFile)
-    const uploadRes = await fetch(`https://${server}.gofile.io/uploadFile`, {
+    const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${GOFILE_TOKEN}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        uploadType: "url",
-        url: fileUrl,
-        accountId: GOFILE_ACCOUNT_ID
+        token: GOFILE_TOKEN,
+        url: url
       })
     });
 
-    const uploadData = await uploadRes.json();
+    const data = await response.json();
 
-    if (uploadData.status !== "ok") {
+    if (data.status !== "ok") {
       return res.status(500).json({
         success: false,
-        error: uploadData
+        error: "GoFile upload failed",
+        gofile: data
       });
     }
 
-    // ✅ Success
     return res.status(200).json({
       success: true,
-      name: uploadData.data.fileName,
-      size: uploadData.data.size,
-      downloadPage: uploadData.data.downloadPage,
-      directLink: uploadData.data.directLink
+      downloadPage: data.data.downloadPage,
+      fileId: data.data.fileId
     });
 
   } catch (err) {
     return res.status(500).json({
       success: false,
-      error: err.message
+      error: "Internal server error",
+      details: err.message
     });
   }
 }
